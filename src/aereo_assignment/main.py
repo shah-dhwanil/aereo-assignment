@@ -15,7 +15,10 @@ from aereo_assignment.api.errors import (
     unhandled_error_handler,
     validation_error_handler,
 )
+from aereo_assignment.api.routes.certificates import router as certificates_router
+from aereo_assignment.api.routes.health import router as health_router
 from aereo_assignment.api.routes.jobs import router as jobs_router
+from aereo_assignment.api.routes.verify import router as verify_router
 from aereo_assignment.config import Settings, get_settings
 from aereo_assignment.db import session as session_module
 from aereo_assignment.db.session import create_engine_from, create_session_factory
@@ -67,10 +70,9 @@ def create_app(
     app.exception_handler(Exception)(unhandled_error_handler)
 
     app.include_router(jobs_router, prefix="/api/v1")
-
-    @app.get("/health")
-    async def health() -> dict:
-        return {"status": "ok"}
+    app.include_router(certificates_router, prefix="/api/v1")
+    app.include_router(verify_router, prefix="/api/v1")
+    app.include_router(health_router)
 
     return app
 
