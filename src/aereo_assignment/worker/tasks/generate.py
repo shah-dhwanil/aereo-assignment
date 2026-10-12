@@ -159,13 +159,15 @@ async def generate_pdf_core(cert_id: UUID, deps: GenerateDeps) -> str:
             )
             await _recompute(deps, job_id)
             return "failed:exhausted"
-        await _cas_outcome(
+        rowcount = await _cas_outcome(
             deps,
             cert_id,
             token=token,
             to_status=CertificateStatus.RETRYING,
             error_message=str(exc),
         )
+        if rowcount == 0:
+            return "skipped:stale"
         raise
     rowcount = await _cas_outcome(
         deps,

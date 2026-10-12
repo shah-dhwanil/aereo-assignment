@@ -172,6 +172,38 @@ async def test_transient_error_moves_to_retrying_and_redelivers(
         assert row.attempts == 2
 
 
+async def test_stale_owner_transient_returns_skipped(
+    session_factory, tmp_path, monkeypatch
+) -> None:
+    _, (cert_id,) = await _seed(session_factory)
+    deps = _deps(session_factory, tmp_path)
+
+    async def _steal_then_boom(key: str, data: bytes) -> None:
+        # Lose ownership mid-flight: a rival worker resets and re-claims
+        # before our cas_outcome(RETRYING) lands, then the store fails.
+        async with session_factory() as s:
+            repos = CertificatesRepository(s)
+            assert await repos.reset_to_pending([cert_id]) == 1
+            assert (
+                await repos.claim(
+                    cert_id, max_attempts=MAX_ATTEMPTS, token=uuid.uuid4()
+                )
+                is not None
+            )
+            await s.commit()
+        raise OSError("disk down")
+
+    monkeypatch.setattr(deps.storage, "write", _steal_then_boom)
+
+    assert await generate_pdf_core(cert_id, deps) == "skipped:stale"
+    async with session_factory() as s:
+        row = await CertificatesRepository(s).get(cert_id)
+        assert row is not None
+        assert row.status == CertificateStatus.PROCESSING
+        assert row.attempts == 2
+        assert row.error_message is None
+
+
 async def test_attempts_cap_exhaustion_fails(
     session_factory, tmp_path, monkeypatch
 ) -> None:

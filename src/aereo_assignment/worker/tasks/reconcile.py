@@ -125,9 +125,13 @@ async def run_reconcile(deps: ReconcileDeps) -> ReconcileSummary:
                 session
             ).reset_to_pending(reset_ids)
             await session.commit()
+        # Ledger the actual reset rowcount: with the non-terminal guard, ids
+        # that went terminal between snapshot and reset are skipped (their
+        # kiq below is absorbed as skipped:unclaimed), so reenqueued tracks
+        # effective resets, never attempted ids.
+        summary["certs_reenqueued"] += summary["stale_certs_reset"]
         for cert_id in reset_ids:
             await generate_pdf.kicker().with_broker(deps.broker).kiq(str(cert_id))
-            summary["certs_reenqueued"] += 1
 
     # Step 3: lost messages for never-claimed certs.
     async with deps.session_factory() as session:

@@ -356,6 +356,55 @@ async def test_reset_to_pending_clears_token(session_factory) -> None:
         assert row.claim_token is None
 
 
+async def test_reset_to_pending_ignores_done(session_factory) -> None:
+    job_id = await _make_job(session_factory)
+    done_token = uuid.uuid4()
+    async with session_factory() as s:
+        repos = CertificatesRepository(s)
+        done = _cert(
+            job_id,
+            status=CertificateStatus.DONE,
+            claim_token=done_token,
+            file_path="jobs/x/keep.pdf",
+        )
+        failed = _cert(job_id, status=CertificateStatus.FAILED)
+        cancelled = _cert(job_id, status=CertificateStatus.CANCELLED)
+        proc = _cert(
+            job_id,
+            status=CertificateStatus.PROCESSING,
+            claim_token=uuid.uuid4(),
+            attempts=1,
+        )
+        await repos.insert_many([done, failed, cancelled, proc])
+        await s.flush()
+        done_id, failed_id, cancelled_id, proc_id = (
+            done.id,
+            failed.id,
+            cancelled.id,
+            proc.id,
+        )
+        await s.commit()
+    async with session_factory() as s:
+        n = await CertificatesRepository(s).reset_to_pending(
+            [done_id, failed_id, cancelled_id, proc_id]
+        )
+        assert n == 1
+        await s.commit()
+    async with session_factory() as s:
+        repos = CertificatesRepository(s)
+        done_row = await repos.get(done_id)
+        assert done_row is not None
+        assert done_row.status == CertificateStatus.DONE
+        assert done_row.claim_token == done_token
+        assert done_row.file_path == "jobs/x/keep.pdf"
+        assert (await repos.get(failed_id)).status == CertificateStatus.FAILED  # type: ignore[union-attr]
+        assert (await repos.get(cancelled_id)).status == CertificateStatus.CANCELLED  # type: ignore[union-attr]
+        proc_row = await repos.get(proc_id)
+        assert proc_row is not None
+        assert proc_row.status == CertificateStatus.PENDING
+        assert proc_row.claim_token is None
+
+
 # --- staleness uses the DB clock ---
 
 

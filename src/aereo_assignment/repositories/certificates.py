@@ -166,9 +166,23 @@ class CertificatesRepository:
         ids = list(ids)
         if not ids:
             return 0
+        # Guard: only non-terminal rows are reset. A live worker may complete
+        # a snapshotted row (claim -> DONE) between reconcile's step-1
+        # snapshot and step-2 reset; an unscoped UPDATE would demote
+        # DONE -> PENDING and clear the winner's token. PENDING is included
+        # so a PENDING -> PENDING reset stays a harmless no-op.
         stmt = (
             update(Certificate)
-            .where(Certificate.id.in_(ids))
+            .where(
+                Certificate.id.in_(ids),
+                Certificate.status.in_(
+                    [
+                        CertificateStatus.PENDING,
+                        CertificateStatus.PROCESSING,
+                        CertificateStatus.RETRYING,
+                    ]
+                ),
+            )
             .values(
                 status=CertificateStatus.PENDING,
                 claim_token=None,
