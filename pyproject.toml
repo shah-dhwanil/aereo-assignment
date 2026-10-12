@@ -29,6 +29,7 @@ dev = [
     "testcontainers[postgres,redis]>=4.9",
     "pypdf>=5",
     "ruff",
+    "psycopg[binary]>=3.3,<4",
 ]
 
 [build-system]
