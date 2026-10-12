@@ -1,0 +1,18 @@
+# Keep the build context lean: only pyproject/uv.lock/README/src/assets/alembic
+# are consumed by the Dockerfile.
+.venv/
+__pycache__/
+*.py[cod]
+.git/
+.worktrees/
+.superpowers/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+storage/
+.env
+tests/
+docs/
+*.log
+htmlcov/
+.coverage*

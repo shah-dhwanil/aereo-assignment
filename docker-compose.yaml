@@ -1,0 +1,97 @@
+# One-command stack: postgres + redis + api + worker + scheduler.
+#
+#   docker compose up --build -d
+#
+# NOTE on taskiq CLI flags (verified at build time against installed
+# taskiq 0.13): `taskiq worker` / `taskiq scheduler` take task modules as
+# POSITIONAL args (`broker [modules ...]`); there is no `--modules` flag —
+# passing `--modules ...` exits 2 with "unrecognized arguments".
+#
+# NOTE on migrations: the api container runs `alembic upgrade head` on boot.
+# That is safe with a single API replica; do NOT scale `api` past 1 without
+# moving migrations to an init container / entrypoint lock.
+
+name: bulk-certificate-generator
+
+x-app-env: &app-env
+  BCG_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/certs
+  BCG_REDIS_URL: redis://redis:6379/0
+  BCG_STORAGE_DIR: /app/storage
+  BCG_BASE_URL: http://localhost:8000
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: certs
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d certs"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    command: sh -c "alembic upgrade head && uvicorn aereo_assignment.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    environment: *app-env
+    volumes:
+      - storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8000/health')\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  worker:
+    build: .
+    command: taskiq worker aereo_assignment.worker.broker:broker aereo_assignment.worker.tasks
+    environment: *app-env
+    volumes:
+      - storage:/app/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+  scheduler:
+    build: .
+    command: taskiq scheduler aereo_assignment.worker.broker:scheduler aereo_assignment.worker.tasks
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      api:
+        condition: service_healthy
+
+volumes:
+  pgdata:
+  storage:

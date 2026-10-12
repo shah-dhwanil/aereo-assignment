@@ -218,3 +218,11 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# local worktrees + agent scratch
+.worktrees/
+.superpowers/
+
+# bulk certificate generator: local artifact storage + env overrides
+storage/
+.env
