@@ -1,7 +1,7 @@
 # Bulk Certificate Generator — Design
 
-**Status:** draft v1.2 (pending approval; implementation plan follows via writing-plans skill)
-**Changelog:** v1.2 — applies design-review amendments C1–C3, H1–H3 (H3 amended per verification), M1–M7, plus X1–X3 found during adversarial verification. v1.1 — builder-check amendments (§10.1–10.6).
+**Status:** draft v1.3 (pending approval; implementation plan follows via writing-plans skill)
+**Changelog:** v1.3 — broker locked to taskiq-redis `RedisStreamBroker` (acknowledged delivery + XAUTOCLAIM redelivery of unacked messages; supersedes v1.2's BRPOP wording). v1.2 — applies design-review amendments C1–C3, H1–H3 (H3 amended per verification), M1–M7, plus X1–X3 found during adversarial verification. v1.1 — builder-check amendments (§10.1–10.6).
 **Date:** 2026-10-11
 **Source assignment:** `Bulk_Certificate_Generator_Backend_Assignment.pdf`
 
@@ -38,9 +38,20 @@ setup / run / test / submit / retrieve.
 ## 3. Constraints & decisions
 
 **Stack (locked):** Python 3.14 · FastAPI + uvicorn · Postgres 16 via SQLAlchemy 2.0
-async (asyncpg driver) · pydantic-settings · **Taskiq + Redis 7** (broker kept
-swappable — RabbitMQ via `taskiq-aio-pika` is a one-line change) · Alembic ·
-reportlab · testcontainers · Docker.
+async (asyncpg driver) · pydantic-settings · **Taskiq + Redis 7** with taskiq-redis
+**`RedisStreamBroker`** (acknowledged delivery; broker kept swappable — RabbitMQ
+via `taskiq-aio-pika` is a one-line change) · Alembic · reportlab · testcontainers · Docker.
+
+**Broker decision (locked):** `RedisStreamBroker` over a bare list queue —
+messages are acknowledged after execution, and a worker that dies mid-task
+leaves its message unacknowledged, which the broker re-delivers via
+`XAUTOCLAIM` once `idle_timeout` elapses. `idle_timeout` is set to
+`reconcile_grace_seconds × 1000` (ms) so broker re-delivery and the DB-side
+reconcile reset fire on the same clock; both paths funnel through the claim
+CAS, so duplicate deliveries are absorbed. This is a durability *accelerator*,
+not a correctness dependency: Redis still holds no truth, and periodic
+reconcile (§10.6) remains the recovery mechanism of record — if every
+unacknowledged message vanished, the system still converges.
 
 **Decisions (locked):**
 
@@ -72,7 +83,7 @@ flowchart TB
     end
 
     Postgres[("Postgres 16<br/>jobs, certificates<br/>STATE OF RECORD")]
-    Redis[("Redis 7<br/>Taskiq broker<br/>DISPOSABLE dispatch")]
+    Redis[("Redis 7<br/>Taskiq RedisStreamBroker<br/>DISPOSABLE dispatch (acked)")]
 
     subgraph WORKER["WORKER — taskiq worker"]
         Dispatch["dispatch_job job_id<br/>1 per job → enqueue N generate_pdf"]
@@ -85,7 +96,7 @@ flowchart TB
     Client -->|"1. POST /jobs<br/>2. GET status<br/>3. GET download / zip"| Routers
     Routers -->|"SQL (ACID)"| Postgres
     Routers -->|"kiq dispatch_job"| Redis
-    Redis -->|"BRPOP"| WORKER
+    Redis -->|"XREADGROUP + ack"| WORKER
     WORKER -->|"SQL: claim / commit / recompute"| Postgres
     WORKER -->|"render + write tmp then os.replace"| Disk
     Routers -->|"read file for download / zip"| Disk
@@ -215,10 +226,10 @@ sequenceDiagram
     P-->>A: COMMIT
     A->>R: kiq dispatch_job(job_id)
     A-->>C: 202 {job_id, total 3, valid 3, invalid 0}
-    R->>W: BRPOP dispatch_job
+    R->>W: XREADGROUP dispatch_job (ack after exec)
     W->>P: CAS job PENDING → PROCESSING
     W->>R: kiq generate_pdf × 3
-    R->>W: BRPOP generate_pdf cert_1
+    R->>W: XREADGROUP generate_pdf cert_1 (ack after exec)
     W->>P: CAS cert_1 → PROCESSING (attempts 1)
     W->>D: render PDF + tmp→replace
     W->>P: CAS cert_1 → DONE + file_path
@@ -308,10 +319,11 @@ sequenceDiagram
     W1->>P: CAS cert → PROCESSING, sets claim_token (wins)
     W2->>P: CAS cert → PROCESSING (rowcount 0)
     Note over W2: status no longer PENDING|RETRYING → no-op return
-    Note over W1: W1 dies before DONE → cert stuck PROCESSING<br/>periodic reconcile resets it; new claim overwrites token
+    Note over W1: W1 dies before DONE → cert stuck PROCESSING<br/>message unacked → XAUTOCLAIM re-delivers after idle_timeout<br/>+ periodic reconcile resets it; new claim overwrites token
 
     Note over W,P: B. PERIODIC reconcile every ~45s + WORKER_STARTUP covers everything below
     Note over W,P: API crash pre-enqueue · Redis flush<br/>worker crash mid-render · duplicate dispatch<br/>crash between final DONE and recompute
+    Note over W,R: broker layer (acks + XAUTOCLAIM) re-delivers<br/>unacked messages after idle_timeout = grace;<br/>reconcile below is still the recovery of record
     W->>P: reset stale: CAS PROCESSING|RETRYING<br/>with updated_at older than grace DB now → PENDING<br/>attempts >= max → FAILED instead, then recompute
     W->>R: enqueue dispatch_job for stale PENDING jobs
     W->>P: recompute stale PROCESSING jobs<br/>updated_at older than grace DB now
@@ -780,6 +792,7 @@ flowchart LR
 | Hybrid processing | All-inline (O(N) enqueue) / all-deferred | 202 receipt needs counts+rows inline; queue decouples Redis availability; dispatch task is the seam |
 | Hybrid validation | Strict 422 / blind accept | Max resilience *and* a real input contract; invalid rows stay visible as failures |
 | Taskiq + Redis | ARQ / Celery+RabbitMQ | Async-native; DI for testable tasks; broker is a swappable config line (RabbitMQ via `taskiq-aio-pika`); Redis never holds state |
+| RedisStreamBroker | ListQueueBroker (BRPOP, fire-and-forget) | Acked delivery: a worker dying mid-task leaves the message unacknowledged and it is XAUTOCLAIMed after `idle_timeout` — worker-crash recovery in seconds instead of waiting for the next reconcile pass; the claim CAS absorbs the resulting duplicate delivery. Reconcile stays the recovery of record; the stream is a latency optimisation, not truth |
 | Per-cert fan-out | One task processes whole job | Independent retry per certificate = structural failure isolation |
 | Derived counts | Columns updated per cert | One source of truth, no drift, no lost-update races |
 | CAS transitions everywhere | Optimistic app-level checks / constraints alone | Every mutation idempotent under duplicate delivery — one mechanism covers retries, crashes, reconciliation |
@@ -790,15 +803,18 @@ flowchart LR
 dispatch. Taskiq keeps the broker a config swap — RabbitMQ is one line — and
 DI plus InMemoryBroker make every task unit-testable with zero infra. Every
 mutation is a CAS transition, so retries, crashes, and reconciliation all
-converge through one mechanism."*
+converge through one mechanism. The stream broker's acks only make worker-crash
+recovery faster — correctness never depends on the queue."*
 
 ---
 
 ## 15. Left to the builder
 
-The implementation plan itself (next step: writing-plans skill). Also: pin the
-exact `taskiq`/`taskiq-redis` version and confirm CLI + middleware kwargs at
-build time; finalize the PDF's visual polish; decide whether `.kiq` result
+The implementation plan itself (next step: writing-plans skill). Also: confirm
+CLI + middleware kwargs at build time (`taskiq==0.13.0`, `taskiq-redis==1.2.4`
+are pinned in the plan — `RedisStreamBroker`, `SmartRetryMiddleware(schedule_source=...)`,
+`ListRedisScheduleSource`, `LabelScheduleSource` verified against those versions);
+finalize the PDF's visual polish; decide whether `.kiq` result
 handling needs any logging hooks. Choose the reconcile trigger implementation
 (Taskiq scheduler vs system cron) at build time; the contract (every ~45s +
 startup, §10.6) is fixed.
