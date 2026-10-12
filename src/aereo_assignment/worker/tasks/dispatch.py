@@ -11,11 +11,7 @@ from aereo_assignment.repositories.certificates import CertificatesRepository
 from aereo_assignment.repositories.jobs import JobsRepository
 from aereo_assignment.worker.broker import broker
 from aereo_assignment.worker.deps import DispatchDeps, get_dispatch_deps
-
-try:
-    from aereo_assignment.worker.tasks.generate import generate_pdf
-except ImportError:  # Task 8 provides the generate task; tests patch this name.
-    generate_pdf = None  # type: ignore[assignment]
+from aereo_assignment.worker.tasks.generate import generate_pdf
 
 
 # NOTE: installed taskiq 0.13 ``broker.task`` takes the name positionally
@@ -45,8 +41,6 @@ async def dispatch_job_core(job_id: UUID, deps: DispatchDeps) -> dict[str, int]:
         )
         ids = list(await CertificatesRepository(session).pending_ids(job_id))
         await session.commit()
-    if generate_pdf is None:  # pragma: no cover - wired once Task 8 lands
-        raise RuntimeError("generate_pdf task is not available")
     for cert_id in ids:
         await generate_pdf.kicker().with_broker(deps.broker).kiq(str(cert_id))
     return {"enqueued": len(ids)}
