@@ -1,14 +1,21 @@
-"""Pure job-status recompute decision (spec section 10.2).
+"""Pure job-status recompute decision (spec section 10.2) plus the shared
+``recompute_job`` step (spec section 10.2 SQL, H2 terminal guard).
 
-The SQL ``UPDATE ... WHERE status NOT IN (terminal)`` guard that applies
-this decision lives in a later task; this module is only the truth table.
+``recompute_job`` used to live as a private copy in
+``worker.tasks.generate``; Task 10 moved it here unchanged in signature so
+the worker and reconcile share one implementation.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from uuid import UUID
+
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from aereo_assignment.db.models import CertificateStatus, JobStatus
+from aereo_assignment.repositories.certificates import CertificatesRepository
+from aereo_assignment.repositories.jobs import JobsRepository
 
 
 def decide_job_status(counts: Mapping[CertificateStatus, int]) -> JobStatus:
@@ -31,3 +38,22 @@ def decide_job_status(counts: Mapping[CertificateStatus, int]) -> JobStatus:
     if done > 0 and failed > 0 and done + failed == total:
         return JobStatus.COMPLETED_WITH_ERRORS
     return JobStatus.PROCESSING
+
+
+async def recompute_job(session: AsyncSession, job_id: UUID) -> JobStatus | None:
+    """Recompute and CAS-apply the job status from certificate counts.
+
+    Returns the applied decision, or ``None`` when the job row is gone or a
+    racing terminal transition (e.g. cancel, H2) won and the write was
+    dropped — the job is never un-cancelled.
+    """
+    jobs = JobsRepository(session)
+    if await jobs.get(job_id) is None:
+        return None
+    counts = await CertificatesRepository(session).status_counts([job_id])
+    decision = decide_job_status(counts.get(job_id, {}))
+    rowcount = await jobs.recompute_cas(job_id, decision)
+    await session.commit()
+    if rowcount == 0:
+        return None
+    return decision

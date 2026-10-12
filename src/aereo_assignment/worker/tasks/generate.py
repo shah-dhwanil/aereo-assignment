@@ -16,7 +16,6 @@ from uuid import UUID, uuid4
 
 from pydantic import ValidationError
 from sqlalchemy import func
-from sqlalchemy.ext.asyncio import AsyncSession
 from taskiq import TaskiqDepends
 
 from aereo_assignment.config import Settings, get_settings
@@ -25,7 +24,7 @@ from aereo_assignment.pdf.renderer import render_certificate
 from aereo_assignment.repositories.certificates import CertificatesRepository
 from aereo_assignment.repositories.jobs import JobsRepository
 from aereo_assignment.services.errors import classify_error
-from aereo_assignment.services.recompute import decide_job_status
+from aereo_assignment.services.recompute import recompute_job
 from aereo_assignment.worker.broker import broker
 from aereo_assignment.worker.deps import GenerateDeps, get_generate_deps
 
@@ -47,22 +46,6 @@ def _load_settings() -> Settings:
 
 
 _task_settings = _load_settings()
-
-
-async def recompute_job(session: AsyncSession, job_id: UUID) -> JobStatus | None:
-    """Recompute and CAS-apply the job status from certificate counts.
-
-    Minimal private step owned by this task; Task 10 moves it unchanged to
-    ``services/recompute.py``. Returns ``None`` when the job row is gone.
-    """
-    jobs = JobsRepository(session)
-    if await jobs.get(job_id) is None:
-        return None
-    counts = await CertificatesRepository(session).status_counts([job_id])
-    decision = decide_job_status(counts.get(job_id, {}))
-    await jobs.recompute_cas(job_id, decision)
-    await session.commit()
-    return decision
 
 
 # NOTE: installed taskiq 0.13 ``broker.task`` takes the name positionally

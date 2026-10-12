@@ -21,5 +21,9 @@ async def test_job_and_certificate_roundtrip(session_factory):
                            recipient_email="d@x.com", certificate_number="CERT-2026-AAAA2222")
         s.add(cert)
         await s.commit()
-        rows = (await s.execute(text("SELECT status FROM jobs"))).scalar_one()
+        rows = (
+            await s.execute(
+                text("SELECT status FROM jobs WHERE id = :id"), {"id": job.id}
+            )
+        ).scalar_one()
         assert rows == JobStatus.PENDING.value

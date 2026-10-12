@@ -3,20 +3,32 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from taskiq import AsyncBroker
 
-from aereo_assignment.api.errors import IdempotencyKeyReused, ZeroValidRows
+from aereo_assignment.api.errors import (
+    IdempotencyKeyReused,
+    JobAlreadyFinal,
+    JobNotFound,
+    ZeroValidRows,
+)
 from aereo_assignment.config import Settings
 from aereo_assignment.db.models import Certificate, CertificateStatus, Job, JobStatus
 from aereo_assignment.repositories.certificates import CertificatesRepository
 from aereo_assignment.repositories.jobs import JobsRepository
-from aereo_assignment.schemas.jobs import JobCreateRequest
+from aereo_assignment.schemas.common import Counts, Page
+from aereo_assignment.schemas.jobs import (
+    JobCreateRequest,
+    JobDetail,
+    JobSummary,
+    JobView,
+)
 from aereo_assignment.services.idempotency import canonical_request_hash
 from aereo_assignment.services.numbering import generate_unique_numbers
 from aereo_assignment.services.validation import validate_recipients
@@ -193,4 +205,106 @@ async def submit_job(
 
     return SubmitResult(
         job=job, total=total, valid=n_valid, invalid=n_invalid, replayed=False
+    )
+
+
+def build_counts(counts_by_status: Mapping[CertificateStatus, int]) -> Counts:
+    """Map per-status certificate counts to the 7-key ``Counts`` shape.
+
+    ``pending`` counts PENDING only and ``processing`` counts PROCESSING
+    (plan Global Constraints / Ruling R3 family).
+    """
+    total = sum(counts_by_status.values())
+    return Counts(
+        total=total,
+        done=counts_by_status.get(CertificateStatus.DONE, 0),
+        failed=counts_by_status.get(CertificateStatus.FAILED, 0),
+        pending=counts_by_status.get(CertificateStatus.PENDING, 0),
+        processing=counts_by_status.get(CertificateStatus.PROCESSING, 0),
+        retrying=counts_by_status.get(CertificateStatus.RETRYING, 0),
+        cancelled=counts_by_status.get(CertificateStatus.CANCELLED, 0),
+    )
+
+
+async def get_job_view(session: AsyncSession, job_id: UUID) -> JobDetail:
+    """Full job detail with derived counts; raises ``JobNotFound``."""
+    job = await JobsRepository(session).get(job_id)
+    if job is None:
+        raise JobNotFound()
+    counts = await CertificatesRepository(session).status_counts([job_id])
+    return JobDetail(
+        job_id=job.id,
+        event_name=job.event_name,
+        status=job.status,
+        counts=build_counts(counts.get(job_id, {})),
+        created_at=job.created_at,
+        completed_at=job.completed_at,
+        event_date=job.event_date,
+        issuer=job.issuer,
+        updated_at=job.updated_at,
+    )
+
+
+async def list_jobs_page(
+    session: AsyncSession,
+    *,
+    status: JobStatus | None,
+    page: int,
+    size: int,
+) -> Page[JobSummary]:
+    """One page of job summaries, each with derived counts."""
+    jobs = JobsRepository(session)
+    total_items = await jobs.count(status=status)
+    rows = await jobs.list(status=status, offset=(page - 1) * size, limit=size)
+    counts = await CertificatesRepository(session).status_counts(
+        [job.id for job in rows]
+    )
+    items = [
+        JobSummary(
+            job_id=job.id,
+            event_name=job.event_name,
+            status=job.status,
+            counts=build_counts(counts.get(job.id, {})),
+            created_at=job.created_at,
+            completed_at=job.completed_at,
+        )
+        for job in rows
+    ]
+    total_pages = (total_items + size - 1) // size if total_items else 0
+    return Page[JobSummary](
+        items=items,
+        page=page,
+        size=size,
+        total_items=total_items,
+        total_pages=total_pages,
+    )
+
+
+async def cancel_job(session: AsyncSession, job_id: UUID) -> JobView:
+    """Soft-cancel a job: CAS to CANCELLED, cancel open certs, return a view.
+
+    Idempotent on an already-CANCELLED job (200 with the same state).
+    Raises ``JobNotFound`` for unknown ids and ``JobAlreadyFinal`` when the
+    job already reached a non-cancel terminal state.
+    """
+    jobs = JobsRepository(session)
+    rowcount = await jobs.cas_transition(
+        job_id,
+        from_statuses=[JobStatus.PENDING, JobStatus.PROCESSING],
+        to_status=JobStatus.CANCELLED,
+        set_completed_at=True,
+    )
+    if rowcount == 0:
+        job = await jobs.get(job_id)
+        if job is None:
+            raise JobNotFound()
+        if job.status != JobStatus.CANCELLED:
+            raise JobAlreadyFinal()
+    await CertificatesRepository(session).cancel_open(job_id)
+    await session.commit()
+    counts = await CertificatesRepository(session).status_counts([job_id])
+    return JobView(
+        job_id=job_id,
+        status=JobStatus.CANCELLED,
+        counts=build_counts(counts.get(job_id, {})),
     )

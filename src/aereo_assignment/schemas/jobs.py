@@ -14,6 +14,7 @@ from uuid import UUID
 from pydantic import BaseModel, Field, StringConstraints
 
 from aereo_assignment.db.models import JobStatus
+from aereo_assignment.schemas.common import Counts
 
 Stripped200 = Annotated[
     str, StringConstraints(strip_whitespace=True, min_length=1, max_length=200)
@@ -42,3 +43,30 @@ class JobAcceptedResponse(BaseModel):
     valid: int
     invalid: int
     created_at: datetime
+
+
+class JobSummary(BaseModel):
+    """One row of ``GET /api/v1/jobs`` (spec section 8.2)."""
+
+    job_id: UUID
+    event_name: str
+    status: JobStatus
+    counts: Counts
+    created_at: datetime
+    completed_at: datetime | None
+
+
+class JobDetail(JobSummary):
+    """``GET /api/v1/jobs/{id}`` (spec section 8.3): summary + identity fields."""
+
+    event_date: date
+    issuer: str
+    updated_at: datetime
+
+
+class JobView(BaseModel):
+    """``POST /api/v1/jobs/{id}/cancel`` response (spec section 8.4)."""
+
+    job_id: UUID
+    status: JobStatus
+    counts: Counts
