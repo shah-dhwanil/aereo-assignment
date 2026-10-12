@@ -117,16 +117,16 @@ class CertificatesRepository:
         file_path: str | None = None,
         generated_at: datetime | None = None,
     ) -> int:
+        # Set outcome columns unconditionally: None clears. A cert that went
+        # PROCESSING -> RETRYING(error="boom") -> PROCESSING -> DONE must not
+        # leave the stale error on the DONE row (user-visible wrong data).
         values: dict = {
             "status": to_status,
+            "error_message": error_message,
+            "file_path": file_path,
+            "generated_at": generated_at,
             "updated_at": func.now(),
         }
-        if error_message is not None:
-            values["error_message"] = error_message
-        if file_path is not None:
-            values["file_path"] = file_path
-        if generated_at is not None:
-            values["generated_at"] = generated_at
         stmt = (
             update(Certificate)
             .where(

@@ -165,6 +165,56 @@ async def test_cas_outcome_requires_matching_token(session_factory) -> None:
         assert row.generated_at == now
 
 
+async def test_cas_outcome_done_clears_stale_error(session_factory) -> None:
+    job_id = await _make_job(session_factory)
+    cert_id = await _make_cert(session_factory, job_id)
+    owner = uuid.uuid4()
+    async with session_factory() as s:
+        repos = CertificatesRepository(s)
+        claimed = await repos.claim(cert_id, max_attempts=MAX_ATTEMPTS, token=owner)
+        assert claimed is not None
+        # First attempt fails retryably: PROCESSING -> RETRYING with an error.
+        assert (
+            await repos.cas_outcome(
+                cert_id,
+                token=owner,
+                to_status=CertificateStatus.RETRYING,
+                error_message="boom",
+            )
+            == 1
+        )
+        await s.commit()
+    async with session_factory() as s:
+        repos = CertificatesRepository(s)
+        retry_token = uuid.uuid4()
+        claimed = await repos.claim(
+            cert_id, max_attempts=MAX_ATTEMPTS, token=retry_token
+        )
+        assert claimed is not None
+        await s.commit()
+    async with session_factory() as s:
+        repos = CertificatesRepository(s)
+        now = datetime.now(UTC)
+        assert (
+            await repos.cas_outcome(
+                cert_id,
+                token=retry_token,
+                to_status=CertificateStatus.DONE,
+                file_path="jobs/x/cert.pdf",
+                generated_at=now,
+            )
+            == 1
+        )
+        await s.commit()
+    async with session_factory() as s:
+        row = await CertificatesRepository(s).get(cert_id)
+        assert row is not None
+        assert row.status == CertificateStatus.DONE
+        assert row.error_message is None
+        assert row.file_path == "jobs/x/cert.pdf"
+        assert row.generated_at == now
+
+
 # --- job recompute CAS ---
 
 
