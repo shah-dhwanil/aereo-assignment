@@ -13,6 +13,8 @@ from alembic.config import Config as AlembicConfig
 from sqlalchemy import Engine, create_engine
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
+from taskiq import InMemoryBroker
+from taskiq.message import BrokerMessage
 from testcontainers.postgres import PostgresContainer
 
 from aereo_assignment.config import Settings
@@ -92,3 +94,12 @@ async def session(
             yield sess
         finally:
             await sess.rollback()
+
+
+class RecordingBroker(InMemoryBroker):
+    """Records kicks without executing them; later tests kick for real via .kicker().with_broker(...)."""
+    def __init__(self) -> None:
+        super().__init__()
+        self.kicked: list[BrokerMessage] = []
+    async def kick(self, message: BrokerMessage) -> None:
+        self.kicked.append(message)
