@@ -222,3 +222,7 @@ __marimo__/
 # local worktrees + agent scratch
 .worktrees/
 .superpowers/
+
+# bulk certificate generator: local artifact storage + env overrides
+storage/
+.env
